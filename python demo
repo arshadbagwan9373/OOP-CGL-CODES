@@ -1,0 +1,99 @@
+import pdfplumber
+import re
+import os
+import pandas as pd
+
+# Path to your PDF file
+pdf_path = "result_demo.pdf"
+
+
+def parse_result(text, sr_no=1):
+    # Extract student name
+    name_match = re.search(r"NAME\s*:\s*([A-Z\s]+)", text, re.IGNORECASE)
+    student_name = name_match.group(1).strip() if name_match else ""
+
+    # Extract semester
+    sem_match = re.search(r"SEM\s*:\s*([IVX]+)", text, re.IGNORECASE)
+    semester = sem_match.group(1).strip() if sem_match else ""
+
+    # Extract all marks like 42/100, 32/50 etc.
+    all_marks = re.findall(r"\d+/\d+", text)
+
+    # IMPORTANT:
+    # Adjust this number if subject count changes
+    SUBJECT_COUNT = 11
+
+    # Take only required number of marks
+    marks = all_marks[:SUBJECT_COUNT]
+
+    # If marks are fewer, pad with empty values
+    while len(marks) < SUBJECT_COUNT:
+        marks.append("")
+
+    # Extract credits earned
+    credits_match = re.search(r"TOTAL CREDIT EARNED\s*:\s*([\d\.]+)", text, re.IGNORECASE)
+    credits = credits_match.group(1).strip() if credits_match else ""
+
+    # Extract SGPA
+    sgpa_match = re.search(r"SGPA\s*:\s*([\d\.]+)", text, re.IGNORECASE)
+    sgpa = sgpa_match.group(1).strip() if sgpa_match else ""
+
+    # Final row (must match 16 columns)
+    output = [str(sr_no), student_name, semester] + marks + [credits, sgpa]
+
+    return output
+
+
+def save_to_excel(new_row, output_file):
+
+    columns = [
+        "Sr No",
+        "Student Name",
+        "Sem",
+        "Fundamentals of Data Structures",
+        "Data Structures Lab",
+        "Mathematical Foundations of Computer Engg",
+        "Computer Organization And Architecture",
+        "Robotics Engineering",
+        "Maintenance Management",
+        "EE1 - Principles of Economics & Software Project Management",
+        "VEC1 - Sustainable Development Goals",
+        "Field Engineering Project",
+        "Design Thinking",
+        "Aptitude and Technical Mastery for Placements-1",
+        "Credits",
+        "SGPA"
+    ]
+
+    # If file exists, load it
+    if os.path.exists(output_file):
+        df = pd.read_excel(output_file)
+    else:
+        df = pd.DataFrame(columns=columns)
+
+    # Create DataFrame for new row
+    new_df = pd.DataFrame([new_row], columns=columns)
+
+    # Append and save
+    df = pd.concat([df, new_df], ignore_index=True)
+    df.to_excel(output_file, index=False)
+
+
+def print_page(n):
+    page_number = n - 1
+
+    with pdfplumber.open(pdf_path) as pdf:
+        if page_number < len(pdf.pages):
+            page = pdf.pages[page_number]
+            text = page.extract_text()
+
+            result = parse_result(text)
+            save_to_excel(result, "results.xlsx")
+
+            print("Data added to Excel sheet successfully")
+        else:
+            print(f"Page {n} does not exist in the PDF.")
+
+
+for i in range(1,6):
+    print_page(i)
