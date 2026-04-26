@@ -1,0 +1,527 @@
+import pandas as pd
+import numpy as np
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+# =====================================
+# LOAD FILE (IMPORTANT: header=4)
+# =====================================
+
+file_path = "sy_btech.xlsx"
+df = pd.read_excel(file_path, header=4)
+df.columns = df.columns.astype(str).str.strip()
+
+# Remove empty rows
+df = df[df["Student Name"].notna()]
+
+# Convert SGPA
+df["SGPA"] = pd.to_numeric(df["SGPA"], errors="coerce")
+
+columns = df.columns.tolist()
+
+# =====================================
+# COMPUTE ALL VALUES
+# =====================================
+
+total_students  = len(df)
+passed_students = len(df[df["Overall Pass/Fail"].str.upper() == "PASS"])
+failed_students = len(df[df["Overall Pass/Fail"].str.upper() == "FAIL"])
+
+def pct(n, total=None):
+    if total is None:
+        total = total_students
+    if total == 0:
+        return "0.00"
+    return f"{round(n / total * 100, 2):.2f}"
+
+# SGPA Classification
+distinction_count = len(df[df["SGPA"] >= 8.0])
+first_class_count = len(df[(df["SGPA"] >= 7.0) & (df["SGPA"] < 8.0)])
+higher_second     = len(df[(df["SGPA"] >= 6.0) & (df["SGPA"] < 7.0)])
+second_class      = len(df[(df["SGPA"] >= 5.0) & (df["SGPA"] < 6.0)])
+pass_class        = len(df[(df["SGPA"] >= 4.0) & (df["SGPA"] < 5.0)])
+
+# Backlog + Subject Analysis
+df["Backlog_Count"] = 0
+subject_data = []  # (subject_name, head_type, passed_count, highest_marks)
+
+for i in range(len(columns)):
+    col = columns[i]
+    if any(code in col for code in ["CE", "OE", "MD", "NC", "EE", "VE"]):
+        try:
+            ext_col    = columns[i + 1]
+            int_col    = columns[i + 3]
+            result_col = columns[i + 5]
+
+            ext      = pd.to_numeric(df[ext_col], errors="coerce")
+            internal = pd.to_numeric(df[int_col], errors="coerce")
+            total    = ext + internal
+            valid    = total.notna()
+
+            if valid.sum() == 0:
+                continue
+
+            max_total = total[valid].max()
+
+            # Backlog threshold
+            if max_total > 50:
+                backlog_cond = (total < 40) & valid
+            else:
+                backlog_cond = (total < 20) & valid
+
+            df["Backlog_Count"] += backlog_cond.astype(int)
+
+            # Subject info
+            df["TOTAL_TEMP"] = ext.fillna(0) + internal.fillna(0)
+            highest_marks    = int(df["TOTAL_TEMP"].max())
+            passed           = (df[result_col].astype(str).str.upper() == "PASS").sum()
+
+            # Determine head type from column name
+            if "TH" in col or "CE" in col or "OE" in col or "MD" in col or "NC" in col:
+                head = "TH"
+            elif "PR" in col or "TW" in col or "OR" in col:
+                head = "TW"
+            else:
+                head = "TH"
+
+            subject_data.append({
+                "subject": col,
+                "head":    head,
+                "passed":  int(passed),
+                "highest": str(highest_marks),
+            })
+
+        except Exception:
+            continue
+
+one_backlog    = len(df[df["Backlog_Count"] == 1])
+two_backlog    = len(df[df["Backlog_Count"] == 2])
+three_backlog  = len(df[df["Backlog_Count"] == 3])
+four_backlog   = len(df[df["Backlog_Count"] == 4])
+more_than_four = len(df[df["Backlog_Count"] > 4])
+
+# Top 5 Toppers
+top5 = df.sort_values("SGPA", ascending=False).head(5)[["Student Name", "SGPA"]].values.tolist()
+
+# =====================================
+# HELPER FUNCTIONS
+# =====================================
+
+TNR = "Times New Roman"
+
+def set_cell_bg(cell, hex_color):
+    tc   = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd  = OxmlElement("w:shd")
+    shd.set(qn("w:val"),   "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"),  hex_color)
+    tcPr.append(shd)
+
+def set_cell_border(cell, color="000000", sz="4"):
+    tc        = cell._tc
+    tcPr      = tc.get_or_add_tcPr()
+    tcBorders = OxmlElement("w:tcBorders")
+    for side in ["top", "bottom", "left", "right"]:
+        el = OxmlElement(f"w:{side}")
+        el.set(qn("w:val"),   "single")
+        el.set(qn("w:sz"),    sz)
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), color)
+        tcBorders.append(el)
+    tcPr.append(tcBorders)
+
+def cell_para(cell, text, bold=False, align="center", font_size=10,
+              color=None, italic=False, wrap=True):
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    para = cell.paragraphs[0]
+    para.clear()
+    para.alignment = {
+        "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "left":   WD_ALIGN_PARAGRAPH.LEFT,
+        "right":  WD_ALIGN_PARAGRAPH.RIGHT,
+    }.get(align, WD_ALIGN_PARAGRAPH.CENTER)
+    run = para.add_run(str(text))
+    run.bold      = bold
+    run.italic    = italic
+    run.font.name = TNR
+    run.font.size = Pt(font_size)
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
+    rPr    = run._r.get_or_add_rPr()
+    rFonts = OxmlElement("w:rFonts")
+    for attr in ["w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"]:
+        rFonts.set(qn(attr), TNR)
+    rPr.insert(0, rFonts)
+    return para
+
+def merge_cells_and_write(cell, text, bold=False, align="center",
+                          font_size=10, color=None):
+    """Write into a cell that may already be a merge target."""
+    cell_para(cell, text, bold=bold, align=align,
+              font_size=font_size, color=color)
+
+def set_col_width(table, col_idx, width_cm):
+    for row in table.rows:
+        row.cells[col_idx].width = Cm(width_cm)
+
+def make_header_row(table, headers, bg="2E4057", font_size=10):
+    row = table.rows[0]
+    for i, hdr in enumerate(headers):
+        c = row.cells[i]
+        cell_para(c, hdr, bold=True, align="center",
+                  font_size=font_size, color="FFFFFF")
+        set_cell_bg(c, bg)
+        set_cell_border(c)
+
+def add_section_title(doc, text):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after  = Pt(4)
+    run = p.add_run(text)
+    run.bold           = True
+    run.font.name      = TNR
+    run.font.size      = Pt(12)
+    run.font.color.rgb = RGBColor(0x1F, 0x3D, 0x6B)
+    p.alignment        = WD_ALIGN_PARAGRAPH.LEFT
+
+def add_merged_header(table, row_idx, col_start, col_end, text,
+                      bg="2E4057", font_size=10):
+    """Merge cells across a row and write header text."""
+    row  = table.rows[row_idx]
+    cell = row.cells[col_start]
+    if col_end > col_start:
+        cell = row.cells[col_start].merge(row.cells[col_end])
+    cell_para(cell, text, bold=True, align="center",
+              font_size=font_size, color="FFFFFF")
+    set_cell_bg(cell, bg)
+    set_cell_border(cell)
+
+# =====================================
+# CREATE DOCUMENT
+# =====================================
+
+doc = Document()
+
+section               = doc.sections[0]
+section.top_margin    = Cm(2)
+section.bottom_margin = Cm(2)
+section.left_margin   = Cm(1.5)
+section.right_margin  = Cm(1.5)
+
+# ─────────────────────────────────────
+# TITLE
+# ─────────────────────────────────────
+title = doc.add_paragraph()
+title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+title.paragraph_format.space_after = Pt(6)
+run = title.add_run("Result Analysis Nov/Dec – 2026 Examination")
+run.bold           = True
+run.font.name      = TNR
+run.font.size      = Pt(14)
+run.font.color.rgb = RGBColor(0x1F, 0x3D, 0x6B)
+
+doc.add_paragraph()
+
+# ─────────────────────────────────────────────────────────────
+# TABLE 1 — RESULT SUMMARY
+# ─────────────────────────────────────────────────────────────
+add_section_title(doc, "Result Summary")
+
+summary_rows = [
+    ("1.",  "Total No. of Students enrolled",           str(total_students),   "100"),
+    ("2",   "Total No. of Students appeared",           str(total_students),   "100"),
+    ("3",   "All Cleared",                              str(passed_students),  pct(passed_students)),
+    ("4",   "First Class With Distinction (≥8.0 SGPA)", str(distinction_count),pct(distinction_count)),
+    ("5",   "First Class (≥7.0 SGPA)",                  str(first_class_count),pct(first_class_count)),
+    ("6",   "Higher Second Class (≥6.0 SGPA)",          str(higher_second),    pct(higher_second)),
+    ("7",   "Second Class (≥5.0 SGPA)",                 str(second_class),     pct(second_class)),
+    ("8",   "Pass Class (≥4.0 SGPA)",                   str(pass_class),       pct(pass_class)),
+    ("9",   "One Backlog",                              str(one_backlog),      pct(one_backlog)),
+    ("10",  "Two Backlog",                              str(two_backlog),      pct(two_backlog)),
+    ("11",  "Three Backlog",                            str(three_backlog),    pct(three_backlog)),
+    ("12",  "Four Backlog",                             str(four_backlog),     pct(four_backlog)),
+    ("13",  "More than Four Backlog",                   str(more_than_four),   pct(more_than_four)),
+    ("14",  "Students promoted to new class",           str(passed_students),  pct(passed_students)),
+]
+
+t1 = doc.add_table(rows=1 + len(summary_rows), cols=4)
+t1.alignment = WD_TABLE_ALIGNMENT.CENTER
+make_header_row(t1, ["Sr. No.", "Particulars", "No. of Students", "Percentage (%)"])
+
+for i, (sr, part, num, perc) in enumerate(summary_rows, start=1):
+    row    = t1.rows[i]
+    bg     = "F0F4FA" if i % 2 == 0 else "FFFFFF"
+    aligns = ["center", "left", "center", "center"]
+    for j, (val, aln) in enumerate(zip([sr, part, num, perc], aligns)):
+        c = row.cells[j]
+        cell_para(c, val, align=aln, font_size=10)
+        set_cell_bg(c, bg)
+        set_cell_border(c)
+
+for i, w in enumerate([1.5, 8.5, 3.5, 3.5]):
+    set_col_width(t1, i, w)
+
+doc.add_paragraph()
+
+# ─────────────────────────────────────────────────────────────
+# TABLE 2 — TOP 5 TOPPERS
+# ─────────────────────────────────────────────────────────────
+add_section_title(doc, "Top 5 SGPA Toppers")
+
+t2 = doc.add_table(rows=1 + len(top5), cols=3)
+t2.alignment = WD_TABLE_ALIGNMENT.CENTER
+make_header_row(t2, ["Rank", "Student Name", "SGPA"])
+
+for i, (name, sgpa_v) in enumerate(top5, start=1):
+    row = t2.rows[i]
+    bg  = "FFF8E7" if i % 2 == 0 else "FFFFFF"
+    sgpa_str = f"{sgpa_v:.2f}" if isinstance(sgpa_v, float) else str(sgpa_v)
+    for j, (val, aln) in enumerate(
+        zip([str(i), str(name), sgpa_str], ["center", "left", "center"])
+    ):
+        c = row.cells[j]
+        cell_para(c, val, align=aln, font_size=10,
+                  bold=(i == 1),
+                  color=("B8860B" if i == 1 else None))
+        set_cell_bg(c, bg)
+        set_cell_border(c)
+
+for i, w in enumerate([2, 10, 4]):
+    set_col_width(t2, i, w)
+
+doc.add_paragraph()
+
+# ─────────────────────────────────────────────────────────────
+# TABLE 3 — SUBJECT WISE ANALYSIS  (existing)
+# ─────────────────────────────────────────────────────────────
+add_section_title(doc, "Subject Wise Analysis")
+
+if subject_data:
+    t3 = doc.add_table(rows=1 + len(subject_data), cols=4)
+    t3.alignment = WD_TABLE_ALIGNMENT.CENTER
+    make_header_row(t3, ["Sr. No.", "Subject", "Highest Marks Scored", "Topper(s)"])
+
+    for i, sd in enumerate(subject_data, start=1):
+        row = t3.rows[i]
+        bg  = "F5F5F5" if i % 2 == 0 else "FFFFFF"
+        # recompute topper name for display
+        df["TOTAL_TEMP2"] = pd.to_numeric(df.get(columns[columns.index(sd["subject"]) + 1], pd.Series(dtype=float)), errors="coerce").fillna(0) + \
+                            pd.to_numeric(df.get(columns[columns.index(sd["subject"]) + 3], pd.Series(dtype=float)), errors="coerce").fillna(0)
+        toppers_str = ", ".join(df.loc[df["TOTAL_TEMP2"] == df["TOTAL_TEMP2"].max(), "Student Name"].tolist())
+        vals   = [str(i), sd["subject"], sd["highest"], toppers_str]
+        aligns = ["center", "left", "center", "left"]
+        for j, (val, aln) in enumerate(zip(vals, aligns)):
+            c = row.cells[j]
+            cell_para(c, val, align=aln, font_size=9)
+            set_cell_bg(c, bg)
+            set_cell_border(c)
+
+    for i, w in enumerate([1.5, 6.5, 3.5, 5.5]):
+        set_col_width(t3, i, w)
+
+    doc.add_paragraph()
+
+# ─────────────────────────────────────────────────────────────
+# TABLE 4 — BACKLOG ANALYSIS
+# ─────────────────────────────────────────────────────────────
+add_section_title(doc, "Backlog Analysis")
+
+backlog_rows = [
+    ("One Backlog",            str(one_backlog),    pct(one_backlog)),
+    ("Two Backlog",            str(two_backlog),    pct(two_backlog)),
+    ("Three Backlog",          str(three_backlog),  pct(three_backlog)),
+    ("Four Backlog",           str(four_backlog),   pct(four_backlog)),
+    ("More than Four Backlog", str(more_than_four), pct(more_than_four)),
+]
+
+t4 = doc.add_table(rows=1 + len(backlog_rows), cols=3)
+t4.alignment = WD_TABLE_ALIGNMENT.CENTER
+make_header_row(t4, ["Backlog Category", "No. of Students", "Percentage (%)"])
+
+for i, (cat, num, perc) in enumerate(backlog_rows, start=1):
+    row = t4.rows[i]
+    bg  = "FFF0F0" if i % 2 == 0 else "FFFFFF"
+    for j, (val, aln) in enumerate(zip([cat, num, perc], ["left", "center", "center"])):
+        c = row.cells[j]
+        cell_para(c, val, align=aln, font_size=10)
+        set_cell_bg(c, bg)
+        set_cell_border(c)
+
+for i, w in enumerate([8, 4, 4]):
+    set_col_width(t4, i, w)
+
+doc.add_paragraph()
+
+# ─────────────────────────────────────────────────────────────
+# TABLE 5 — SUBJECT DETAIL: Sr.No | Subject | Head | Passed | Highest | Faculty
+# ─────────────────────────────────────────────────────────────
+add_section_title(doc, "Subject-wise Performance Detail")
+
+num_subj = max(len(subject_data), 1)
+t5 = doc.add_table(rows=1 + num_subj, cols=6)
+t5.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+HEADER_BG   = "1F3D6B"
+HEADER_COLS = [
+    "Sr. No.",
+    "Subject",
+    "Head\n(TH/TW)",
+    "No. of Students\nPassed",
+    "Highest\nMarks",
+    "Faculty Name",
+]
+
+# Header row
+hrow = t5.rows[0]
+for j, hdr in enumerate(HEADER_COLS):
+    c = hrow.cells[j]
+    cell_para(c, hdr, bold=True, align="center", font_size=9, color="FFFFFF")
+    set_cell_bg(c, HEADER_BG)
+    set_cell_border(c)
+
+# Data rows
+for i, sd in enumerate(subject_data, start=1):
+    row = t5.rows[i]
+    bg  = "EEF4FB" if i % 2 == 0 else "FFFFFF"
+    vals   = [str(i), sd["subject"], sd["head"], str(sd["passed"]), sd["highest"], ""]
+    aligns = ["center", "left", "center", "center", "center", "center"]
+    for j, (val, aln) in enumerate(zip(vals, aligns)):
+        c = row.cells[j]
+        cell_para(c, val, align=aln, font_size=9)
+        set_cell_bg(c, bg)
+        set_cell_border(c)
+
+# Column widths  (total ≈ 17 cm for 1.5cm L+R margins on A4)
+for i, w in enumerate([1.2, 5.5, 2.0, 3.0, 2.5, 3.8]):
+    set_col_width(t5, i, w)
+
+doc.add_paragraph()
+
+# ─────────────────────────────────────────────────────────────
+# TABLE 6 — MULTI-YEAR COMPARISON  (blank data, from image)
+#   Columns: Sr.No | Particulars | 2025-26 No. | 2025-26 % |
+#             2024-25 No. | 2024-25 % | 2023-24 No. | 2023-24 % |
+#             2022-23 No. | 2022-23 %
+# ─────────────────────────────────────────────────────────────
+add_section_title(doc, "Year-wise Comparison")
+
+particulars_list = [
+    "1.",  "Total No. of Students enrolled",
+    "2",   "Total No. of Students appeared",
+    "3",   "All Cleared",
+    "4",   "First Class With Distinction",
+    "5",   "First Class",
+    "6",   "Higher Second Class",
+    "7",   "Second Class",
+    "8",   "Pass Class",
+    "9",   "One Backlog",
+    "10",  "Two Backlog",
+    "11",  "Three Backlog",
+    "12",  "Four Backlog",
+    "13",  "More than  four Backlog",
+    "14",  "Students promoted to new class",
+]
+
+# Build rows as (sr, label) pairs
+part_rows = []
+it = iter(particulars_list)
+for sr in it:
+    label = next(it)
+    part_rows.append((sr, label))
+
+# 2 header rows + 14 data rows = 16 rows total, 10 cols
+t6 = doc.add_table(rows=2 + len(part_rows), cols=10)
+t6.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+COMP_BG   = "2E4057"
+COMP_BG2  = "3E5A7A"
+
+# ── Row 0: top merged headers ──
+years = ["2025-26 Sem-I", "2024-25 Sem-I", "2023-24 Sem-I", "2022-23 Sem-I"]
+row0 = t6.rows[0]
+
+# Sr. No. — spans 2 rows visually; write on row 0, we'll also fill row 1
+c = row0.cells[0]
+cell_para(c, "Sr.\nNo.", bold=True, align="center", font_size=8, color="FFFFFF")
+set_cell_bg(c, COMP_BG); set_cell_border(c)
+
+# Particulars — spans 2 rows visually
+c = row0.cells[1]
+cell_para(c, "Particulars", bold=True, align="center", font_size=8, color="FFFFFF")
+set_cell_bg(c, COMP_BG); set_cell_border(c)
+
+# Year group headers — each spans 2 cols
+year_col_starts = [2, 4, 6, 8]
+for yr, col_s in zip(years, year_col_starts):
+    merged = row0.cells[col_s].merge(row0.cells[col_s + 1])
+    cell_para(merged, yr, bold=True, align="center", font_size=8, color="FFFFFF")
+    set_cell_bg(merged, COMP_BG2)
+    set_cell_border(merged)
+
+# ── Row 1: sub-headers (No. of Students / Percentage) ──
+row1 = t6.rows[1]
+sub_labels = ["No. of\nStudents", "Percentage\n(%)"] * 4
+
+# Sr.No and Particulars cells in row1 — keep blank but styled
+for col_idx in [0, 1]:
+    c = row1.cells[col_idx]
+    cell_para(c, "", bold=True, align="center", font_size=8, color="FFFFFF")
+    set_cell_bg(c, COMP_BG)
+    set_cell_border(c)
+
+for k, lbl in enumerate(sub_labels):
+    c = row1.cells[2 + k]
+    cell_para(c, lbl, bold=True, align="center", font_size=8, color="FFFFFF")
+    set_cell_bg(c, COMP_BG2)
+    set_cell_border(c)
+
+# ── Data rows (all blank except Sr.No and Particulars) ──
+for i, (sr, label) in enumerate(part_rows, start=2):
+    row = t6.rows[i]
+    bg  = "F0F4FA" if i % 2 == 0 else "FFFFFF"
+
+    # Sr. No.
+    c = row.cells[0]
+    cell_para(c, sr, align="center", font_size=9)
+    set_cell_bg(c, bg); set_cell_border(c)
+
+    # Particulars
+    c = row.cells[1]
+    cell_para(c, label, align="left", font_size=9)
+    set_cell_bg(c, bg); set_cell_border(c)
+
+    # 8 blank data cells
+    for col_idx in range(2, 10):
+        c = row.cells[col_idx]
+        cell_para(c, "", align="center", font_size=9)
+        set_cell_bg(c, bg); set_cell_border(c)
+
+# Column widths
+for i, w in enumerate([0.9, 4.5, 1.6, 1.8, 1.6, 1.8, 1.6, 1.8, 1.6, 1.8]):
+    set_col_width(t6, i, w)
+
+doc.add_paragraph()
+
+# ─────────────────────────────────────
+# FOOTER NOTE
+# ─────────────────────────────────────
+note = doc.add_paragraph()
+note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+note.paragraph_format.space_before = Pt(10)
+run = note.add_run("Generated automatically from examination result data.")
+run.italic         = True
+run.font.name      = TNR
+run.font.size      = Pt(9)
+run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+# =====================================
+# SAVE
+# =====================================
+output_file = "Result_Analysis_test.docx"
+doc.save(output_file)
+print(f"Word document '{output_file}' created successfully!")
